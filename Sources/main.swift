@@ -155,7 +155,7 @@ enum QuotaClient {
                 throw stoppedError()
             }
         }
-        try send(["id": 1, "method": "initialize", "params": ["clientInfo": ["name": "codex_usage_bar", "title": "Codex Usage Bar", "version": "1.2.1"]]])
+        try send(["id": 1, "method": "initialize", "params": ["clientInfo": ["name": "codex_usage_bar", "title": "Codex Usage Bar", "version": "1.2.2"]]])
         var buffer = Data()
         while true {
             let chunk = output.fileHandleForReading.availableData
@@ -293,6 +293,68 @@ struct QuotaRow: View {
         }.padding(14).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
     }
 }
+// Informational content uses a custom menu view so macOS does not dim it as disabled commands.
+struct MenuQuotaCard: View {
+    let window: QuotaWindow
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(window.label + "额度")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer(minLength: 8)
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(window.remaining.map { String(format: "%.0f%%", $0) } ?? "—")
+                        .font(.system(size: 21, weight: .semibold)).monospacedDigit()
+                    Text("剩余").font(.system(size: 11))
+                }
+            }
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .medium))
+                Text(window.resetText).font(.system(size: 12)).monospacedDigit()
+            }
+        }
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+struct QuotaMenuSummary: View {
+    let limits: Limits?
+    let updatedAt: Date?
+    let error: String?
+    let loading: Bool
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Codex 剩余额度").font(.system(size: 13, weight: .semibold))
+                .padding(.horizontal, 2).padding(.bottom, 2)
+            if let limits {
+                ForEach(limits.buckets, id: \.0) { id, bucket in
+                    if limits.buckets.count > 1 {
+                        Text(bucket.limitName ?? id).font(.system(size: 12, weight: .semibold))
+                    }
+                    if let window = bucket.primary { MenuQuotaCard(window: window) }
+                    if let window = bucket.secondary { MenuQuotaCard(window: window) }
+                }
+            } else {
+                Text(loading ? "正在读取用量…" : "暂时没有额度数据")
+                    .font(.system(size: 12))
+            }
+            if let error {
+                Text(error + (limits == nil ? "" : " 当前显示上次成功数据。"))
+                    .font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+            }
+            if let date = updatedAt {
+                Text("上次更新 " + date.formatted(date: .omitted, time: .standard))
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 2).padding(.top, 2)
+            }
+        }
+        .foregroundStyle(.primary).padding(12).frame(width: 288)
+    }
+}
+
 struct UsageView: View {
     @ObservedObject var model: UsageModel
     @State var floating = true
@@ -370,18 +432,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     func menuWillOpen(_ menu: NSMenu) {
         menu.removeAllItems()
-        if let limits = model.limits {
-            for (id, bucket) in limits.buckets {
-                let heading = NSMenuItem(title: bucket.limitName ?? (id == "codex" ? "Codex 剩余额度" : id), action: nil, keyEquivalent: "")
-                menu.addItem(heading)
-                for w in [bucket.primary, bucket.secondary].compactMap({ $0 }) {
-                    menu.addItem(NSMenuItem(title: w.label + "剩余 " + (w.remaining.map { String(format: "%.0f%%", $0) } ?? "—"), action: nil, keyEquivalent: ""))
-                    menu.addItem(NSMenuItem(title: w.resetText, action: nil, keyEquivalent: ""))
-                }
-            }
-        }
-        if let error = model.error { menu.addItem(NSMenuItem(title: error, action: nil, keyEquivalent: "")) }
-        if let date = model.updatedAt { menu.addItem(NSMenuItem(title: "更新于 " + date.formatted(date: .omitted, time: .standard), action: nil, keyEquivalent: "")) }
+        let summary = QuotaMenuSummary(limits: model.limits, updatedAt: model.updatedAt, error: model.error, loading: model.loading)
+        let view = NSHostingView(rootView: summary)
+        view.frame = NSRect(origin: .zero, size: view.fittingSize)
+        let info = NSMenuItem()
+        info.view = view
+        menu.addItem(info)
         menu.addItem(.separator())
         for (title, selector, key) in [("显示独立窗口", #selector(showWindow), ""), ("立即刷新", #selector(refresh), "r"), ("退出", #selector(quit), "q")] {
             let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
