@@ -10,7 +10,7 @@
 
 [下载 macOS Apple Silicon 版](downloads/CodexUsageBar-macos-arm64.zip)，解压后运行 `CodexUsageBar.app`。升级时先从旧版菜单中选择「退出」，再打开新版。
 
-当前下载版本为 1.2.0，使用本地临时签名，未经 Apple 公证。Intel Mac 请按下方步骤从源码构建。
+当前下载版本为 1.2.1，使用本地临时签名，未经 Apple 公证。Intel Mac 请按下方步骤从源码构建。
 
 ## 功能
 
@@ -20,7 +20,8 @@
 - 每 60 秒自动刷新，电脑唤醒后刷新，也可手动刷新。
 - 点击菜单栏查看重置时间或打开独立窗口。
 - 支持多个用量桶；菜单栏显示主要桶，菜单和窗口显示全部桶。
-- 查询失败时保留上次数据，显示异常标记和最后更新时间。
+- 短暂超时、请求失败或查询进程退出时，等待 2 秒自动重连重试一次。重试期间保留上次数据；两次均失败才显示异常标记。登录失效等明确错误直接提示。
+- 查询失败时保留上次数据和最后成功更新时间，区分超时、登录失效、请求被拒绝、服务繁忙及本地服务退出。感叹号表示用量未能刷新，不表示 Codex 应用已断线。
 
 此工具显示的是 **Codex 额度**。它不代表所有 ChatGPT 模型的剩余用量，也不是 OpenAI 官方应用。
 
@@ -53,6 +54,12 @@ open dist/CodexUsageBar.app
 
 ```sh
 dist/CodexUsageBar.app/Contents/MacOS/CodexUsageBar --check
+```
+
+运行查询回归测试（需要 Python 3 和 Swift）：
+
+```sh
+bash scripts/test.sh
 ```
 
 ## 源码结构

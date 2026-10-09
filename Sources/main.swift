@@ -54,7 +54,47 @@ struct Limits: Decodable {
 }
 enum QueryError: LocalizedError {
     case message(String)
-    var errorDescription: String? { if case .message(let text) = self { return text }; return nil }
+    case timeout
+    case stopped(Int32)
+    case rpc(Int?, String)
+    case invalidResponse
+
+    var retryable: Bool {
+        switch self {
+        case .timeout, .stopped: return true
+        case .rpc(let code, let message):
+            let text = message.lowercased()
+            if code == -32600 || code == -32601 || code == -32602 { return false }
+            if text.contains("401") || text.contains("403") || text.contains("not logged in") || text.contains("unauthorized") { return false }
+            return true
+        case .message, .invalidResponse: return false
+        }
+    }
+    var errorDescription: String? {
+        switch self {
+        case .message(let text): return text
+        case .timeout: return "额度查询超时，已自动重试；稍后会继续刷新。"
+        case .stopped(let code): return "本地 Codex 查询服务退出（状态 \(code)），已自动重试。"
+        case .invalidResponse: return "Codex 返回的额度格式无法识别，请检查 Codex 是否需要更新。"
+        case .rpc(let code, let message):
+            let text = message.lowercased()
+            if text.contains("401") || text.contains("not logged in") || text.contains("unauthorized") {
+                return "Codex 登录状态失效，请在 Codex 中重新登录。"
+            }
+            if text.contains("403") { return "账户额度查询被拒绝（403），请检查 Codex 账户状态。" }
+            if text.contains("429") { return "额度服务请求过于频繁，已自动重试；稍后会继续刷新。" }
+            if code == -32600 || code == -32601 || code == -32602 {
+                return "本机 Codex 接口不兼容（代码 \(code!)），请更新 Codex。"
+            }
+            if text.contains("timed out") || text.contains("timeout") {
+                return "额度服务响应超时，已自动重试；稍后会继续刷新。"
+            }
+            if text.contains("error sending request") || text.contains("connection") || text.contains("network") {
+                return "额度服务网络请求失败，已自动重试；稍后会继续刷新。"
+            }
+            return "额度查询失败" + (code.map { "（代码 \($0)）" } ?? "") + "，稍后会继续刷新。"
+        }
+    }
 }
 
 enum QuotaClient {
@@ -66,7 +106,15 @@ enum QuotaClient {
         ]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
-    static func read() throws -> Limits {
+    // A fresh connection on retry also recovers a crashed local query server.
+    static func read(executable: String? = QuotaClient.executable, timeout: TimeInterval = 25, retryDelay: TimeInterval = 2) throws -> Limits {
+        do { return try readOnce(executable: executable, timeout: timeout) }
+        catch let error as QueryError where error.retryable {
+            Thread.sleep(forTimeInterval: retryDelay)
+            return try readOnce(executable: executable, timeout: timeout)
+        }
+    }
+    private static func readOnce(executable: String?, timeout: TimeInterval) throws -> Limits {
         guard let executable else { throw QueryError.message("找不到 Codex，请先安装并登录 Codex。") }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -76,26 +124,38 @@ enum QuotaClient {
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         process.currentDirectoryURL = FileManager.default.temporaryDirectory
-        try process.run()
+        do { try process.run() }
+        catch { throw QueryError.message("本地 Codex 查询服务无法启动，请检查 Codex 安装。") }
         let deadline = DispatchWorkItem { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 25, execute: deadline)
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
+        let startedAt = ProcessInfo.processInfo.systemUptime
         defer {
             deadline.cancel()
+            try? input.fileHandleForWriting.close()
             if process.isRunning {
                 process.terminate()
                 DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
                     if process.isRunning { kill(process.processIdentifier, SIGKILL) }
                 }
             }
-            try? input.fileHandleForWriting.close()
             try? output.fileHandleForReading.close()
+        }
+        func stoppedError() -> QueryError {
+            if ProcessInfo.processInfo.systemUptime - startedAt >= timeout { return .timeout }
+            process.waitUntilExit()
+            return .stopped(process.terminationStatus)
         }
         func send(_ value: [String: Any]) throws {
             var data = try JSONSerialization.data(withJSONObject: value)
             data.append(10)
-            try input.fileHandleForWriting.write(contentsOf: data)
+            do { try input.fileHandleForWriting.write(contentsOf: data) }
+            catch {
+                // Do not wait on a still-running server that closed only stdin.
+                if process.isRunning { process.terminate() }
+                throw stoppedError()
+            }
         }
-        try send(["id": 1, "method": "initialize", "params": ["clientInfo": ["name": "codex_usage_bar", "title": "Codex Usage Bar", "version": "1.2.0"]]])
+        try send(["id": 1, "method": "initialize", "params": ["clientInfo": ["name": "codex_usage_bar", "title": "Codex Usage Bar", "version": "1.2.1"]]])
         var buffer = Data()
         while true {
             let chunk = output.fileHandleForReading.availableData
@@ -105,22 +165,24 @@ enum QuotaClient {
                 let line = buffer.subdata(in: buffer.startIndex..<end)
                 buffer.removeSubrange(buffer.startIndex...end)
                 guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-                      let id = object["id"] as? Int else { continue }
-                if object["error"] != nil {
-                    throw QueryError.message("用量读取失败，请确认 Codex 已登录且网络连接正常。")
+                      let id = object["id"] as? Int, id == 1 || id == 2 else { continue }
+                if let error = object["error"] as? [String: Any] {
+                    throw QueryError.rpc(error["code"] as? Int, error["message"] as? String ?? "")
                 }
                 if id == 1 {
                     try send(["method": "initialized"])
                     try send(["id": 2, "method": "account/rateLimits/read"])
-                } else if id == 2, let result = object["result"] {
-                    let data = try JSONSerialization.data(withJSONObject: result)
-                    let limits = try JSONDecoder().decode(Limits.self, from: data)
+                } else if let result = object["result"] {
+                    guard let data = try? JSONSerialization.data(withJSONObject: result),
+                          let limits = try? JSONDecoder().decode(Limits.self, from: data) else {
+                        throw QueryError.invalidResponse
+                    }
                     guard !limits.buckets.isEmpty else { throw QueryError.message("账户暂未返回可显示的用量。") }
                     return limits
-                }
+                } else { throw QueryError.invalidResponse }
             }
         }
-        throw QueryError.message("读取超时或服务未启动，请确认 Codex 已登录，然后刷新。")
+        throw stoppedError()
     }
 }
 
