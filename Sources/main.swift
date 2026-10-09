@@ -95,7 +95,7 @@ enum QuotaClient {
             data.append(10)
             try input.fileHandleForWriting.write(contentsOf: data)
         }
-        try send(["id": 1, "method": "initialize", "params": ["clientInfo": ["name": "codex_usage_bar", "title": "Codex Usage Bar", "version": "1.0.0"]]])
+        try send(["id": 1, "method": "initialize", "params": ["clientInfo": ["name": "codex_usage_bar", "title": "Codex Usage Bar", "version": "1.2.0"]]])
         var buffer = Data()
         while true {
             let chunk = output.fileHandleForReading.availableData
@@ -162,46 +162,54 @@ final class UsageModel: ObservableObject {
     }
 }
 
-// Draw into the native status button. Mouse events stay with the button and its menu.
-final class StatusQuotaView: NSView {
+// A template image lets macOS tint every mark for wallpaper contrast and menu selection.
+final class StatusQuotaRenderer {
     var windows: [QuotaWindow] = []
     var failed = false
-    override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
     private let labelFont = NSFont.systemFont(ofSize: 9, weight: .medium)
-    private let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
+    private let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .semibold)
     var preferredWidth: CGFloat {
         let labelWidth = windows.map { ($0.compactLabel as NSString).size(withAttributes: [.font: labelFont]).width }.max() ?? 11
         let valueWidth = ("100%" as NSString).size(withAttributes: [.font: valueFont]).width
         return ceil(max(54, labelWidth + valueWidth + 12))
     }
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        let highlighted = (superview as? NSStatusBarButton)?.isHighlighted == true
-        let foreground: NSColor = highlighted ? .selectedMenuItemTextColor : .labelColor
-        let secondary: NSColor = highlighted ? foreground : .secondaryLabelColor
-        func drawText(_ text: String, x: CGFloat, y: CGFloat, font: NSFont, color: NSColor) {
-            (text as NSString).draw(at: NSPoint(x: x, y: y), withAttributes: [.font: font, .foregroundColor: color])
+    func image() -> NSImage {
+        let bounds = NSRect(x: 0, y: 0, width: preferredWidth, height: 22)
+        let image = NSImage(size: bounds.size, flipped: true) { [windows = self.windows, failed = self.failed, labelFont = self.labelFont, valueFont = self.valueFont] _ in
+        func drawText(_ text: String, x: CGFloat, y: CGFloat, font: NSFont) {
+            (text as NSString).draw(at: NSPoint(x: x, y: y), withAttributes: [.font: font, .foregroundColor: NSColor.black])
         }
         if windows.isEmpty {
             let text = failed ? "额度 !" : "额度 …"
             let size = (text as NSString).size(withAttributes: [.font: valueFont])
-            drawText(text, x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2, font: valueFont, color: foreground)
-            return
+            drawText(text, x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2, font: valueFont)
+        } else {
+            let rowHeight: CGFloat = 11
+            let rows = Array(windows.prefix(2))
+            let startY = (bounds.height - CGFloat(rows.count) * rowHeight) / 2
+            for (index, window) in rows.enumerated() {
+                let y = startY + CGFloat(index) * rowHeight
+                let text = window.remaining.map { String(format: "%.0f%%", $0) } ?? "—"
+                let width = (text as NSString).size(withAttributes: [.font: valueFont]).width
+                drawText(window.compactLabel, x: 3, y: y, font: labelFont)
+                drawText(text, x: bounds.width - 7 - width, y: y, font: valueFont)
+                if let remaining = window.remaining {
+                    let track = NSRect(x: bounds.width - 37, y: y + 10.25, width: 30, height: 0.75)
+                    NSColor.black.withAlphaComponent(0.18).setFill()
+                    NSBezierPath(roundedRect: track, xRadius: 0.375, yRadius: 0.375).fill()
+                    if remaining > 0 {
+                        NSColor.black.setFill()
+                        let fill = NSRect(x: track.minX, y: track.minY, width: track.width * remaining / 100, height: track.height)
+                        NSBezierPath(roundedRect: fill, xRadius: 0.375, yRadius: 0.375).fill()
+                    }
+                }
+            }
+            if failed { drawText("!", x: bounds.width - 5, y: 5.5, font: labelFont) }
         }
-        let rowHeight: CGFloat = 11
-        let startY = (bounds.height - CGFloat(windows.count) * rowHeight) / 2
-        for (index, window) in windows.prefix(2).enumerated() {
-            let y = startY + CGFloat(index) * rowHeight
-            let text = window.remaining.map { String(format: "%.0f%%", $0) } ?? "—"
-            let width = (text as NSString).size(withAttributes: [.font: valueFont]).width
-            let color: NSColor = !highlighted && (failed || (window.remaining.map { $0 <= 20 } ?? false)) ? .systemOrange : foreground
-            drawText(window.compactLabel, x: 3, y: y + 0.5, font: labelFont, color: secondary)
-            drawText(text, x: bounds.width - 7 - width, y: y, font: valueFont, color: color)
+        return true
         }
-        if failed {
-            drawText("!", x: bounds.width - 5, y: (bounds.height - 11) / 2, font: labelFont, color: highlighted ? foreground : .systemOrange)
-        }
+        image.isTemplate = true
+        return image
     }
 }
 
@@ -274,14 +282,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var status: NSStatusItem!
     var window: NSWindow?
     var timer: Timer?
-    let statusView = StatusQuotaView(frame: .zero)
+    let statusRenderer = StatusQuotaRenderer()
     func applicationDidFinishLaunching(_ notification: Notification) {
         status = NSStatusBar.system.statusItem(withLength: 54)
         if let button = status.button {
             button.title = ""
-            statusView.frame = button.bounds
-            statusView.autoresizingMask = [.width, .height]
-            button.addSubview(statusView)
+            button.imagePosition = .imageOnly
         }
         let menu = NSMenu()
         menu.delegate = self
@@ -293,10 +299,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(woke), name: NSWorkspace.didWakeNotification, object: nil)
     }
     func update() {
-        statusView.windows = model.statusWindows
-        statusView.failed = model.error != nil
-        status.length = statusView.preferredWidth
-        statusView.needsDisplay = true
+        statusRenderer.windows = model.statusWindows
+        statusRenderer.failed = model.error != nil
+        status.length = statusRenderer.preferredWidth
+        status.button?.image = statusRenderer.image()
         status.button?.toolTip = model.statusDescription
         status.button?.setAccessibilityLabel(model.statusDescription)
     }
