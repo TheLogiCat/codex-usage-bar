@@ -1,2 +1,66 @@
-# codex-usage-bar
-show your codex usage
+# Codex Usage Bar
+
+一个轻量的 macOS 菜单栏工具，持续显示 Codex 的剩余额度，并提供可置顶的独立窗口。
+
+![菜单栏显示示例，放大4倍](docs/menu-bar-preview.png)
+
+上行为 5 小时额度，下行为每周额度，数字均表示**剩余百分比**。图片放大 4 倍便于查看，数值为示例；实际菜单栏常规宽度为 54 pt。
+
+## 下载
+
+[下载 macOS Apple Silicon 版](downloads/CodexUsageBar-macos-arm64.zip)，解压后运行 `CodexUsageBar.app`。升级时先从旧版菜单中选择「退出」，再打开新版。
+
+当前下载版本为 1.1.0，使用本地临时签名，未经 Apple 公证。Intel Mac 请按下方步骤从源码构建。
+
+## 功能
+
+- 显示 5 小时和每周的剩余百分比，支持服务返回的其他用量周期。
+- 菜单栏采用上下两行：`5h 95%` / `周 49%`，常见周期占约 54 pt 宽度。等宽数字和固定宽度避免刷新时跳动；示例数值仅用于说明。
+- 适配深浅色菜单栏，剩余额度不超过 20% 时用橙色提醒；鼠标悬停显示完整周期和更新时间。
+- 每 60 秒自动刷新，电脑唤醒后刷新，也可手动刷新。
+- 点击菜单栏查看重置时间或打开独立窗口。
+- 支持多个用量桶；菜单栏显示主要桶，菜单和窗口显示全部桶。
+- 查询失败时保留上次数据，显示异常标记和最后更新时间。
+
+此工具显示的是 **Codex 额度**。它不代表所有 ChatGPT 模型的剩余用量，也不是 OpenAI 官方应用。
+
+## 环境要求
+
+- macOS 13 或更新版本。
+- 本机已安装并登录 ChatGPT/Codex。支持应用内置 Codex CLI，以及 `/opt/homebrew/bin/codex` 或 `/usr/local/bin/codex`。
+- 从源码构建需要 Swift 编译器和 macOS SDK（Xcode Command Line Tools）。
+
+## 构建与运行
+
+```sh
+bash scripts/build.sh
+open dist/CodexUsageBar.app
+```
+
+脚本按当前 Mac 的架构构建应用，生成 `dist/CodexUsageBar.app` 和 `dist/CodexUsageBar.zip`。构建过程在临时目录签名，避免云盘文件属性影响签名。
+
+应用默认只出现在菜单栏。点击菜单中的「显示独立窗口」打开可置顶窗口；关闭窗口后仍在菜单栏运行。完全退出请选择菜单中的「退出」。
+
+如需登录后自动启动，可在 macOS「系统设置 → 通用 → 登录项」中添加应用。
+
+## 用量与登录
+
+通过本机 Codex app-server 的官方 `account/rateLimits/read` 接口读取账户用量，复用本机 Codex 登录状态。不需要 API Key，不复制或导出登录凭据，也不启动模型对话。Codex 自身负责账户认证和运行时数据。
+
+剩余百分比为 `100 − usedPercent`，限制在 0–100% 之间。缺失的数据不会视为 0；重置时间按系统本地时区显示。
+
+验证实际查询：
+
+```sh
+dist/CodexUsageBar.app/Contents/MacOS/CodexUsageBar --check
+```
+
+## 源码结构
+
+```text
+Sources/main.swift      用量查询、菜单栏与独立窗口
+Resources/Info.plist    macOS 应用元数据
+scripts/build.sh        本机构建、签名与打包
+```
+
+官方接口文档：[Codex App Server](https://learn.chatgpt.com/docs/app-server)。
