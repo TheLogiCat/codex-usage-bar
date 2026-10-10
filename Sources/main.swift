@@ -155,7 +155,7 @@ enum QuotaClient {
                 throw stoppedError()
             }
         }
-        try send(["id": 1, "method": "initialize", "params": ["clientInfo": ["name": "codex_usage_bar", "title": "Codex Usage Bar", "version": "1.2.2"]]])
+        try send(["id": 1, "method": "initialize", "params": ["clientInfo": ["name": "codex_usage_bar", "title": "Codex Usage Bar", "version": "1.3.0"]]])
         var buffer = Data()
         while true {
             let chunk = output.fileHandleForReading.availableData
@@ -401,6 +401,60 @@ struct UsageView: View {
     }
 }
 
+enum CodexAutostart {
+    static let label = "local.codex.usagebar.watch-codex"
+    static let domain = "gui/" + String(getuid())
+    static var agentURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/" + label + ".plist")
+    }
+    static var isEnabled: Bool { FileManager.default.fileExists(atPath: agentURL.path) }
+    private static func launchctl(_ arguments: [String]) throws -> (Int32, String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+    }
+    static func enable() throws {
+        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/CodexUsageWatcher")
+        guard FileManager.default.isExecutableFile(atPath: helper.path) else {
+            throw QueryError.message("找不到自启动助手，请重新下载完整应用。")
+        }
+        let previous = try? Data(contentsOf: agentURL)
+        let plist: [String: Any] = [
+            "Label": label, "ProgramArguments": [helper.path],
+            "RunAtLoad": true, "KeepAlive": true,
+            "ProcessType": "Background", "LimitLoadToSessionType": "Aqua",
+            "AssociatedBundleIdentifiers": ["local.codex.usagebar"]
+        ]
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try FileManager.default.createDirectory(at: agentURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: agentURL, options: .atomic)
+        _ = try launchctl(["bootout", domain + "/" + label])
+        let (status, message) = try launchctl(["bootstrap", domain, agentURL.path])
+        if status != 0 {
+            if let previous {
+                try? previous.write(to: agentURL, options: .atomic)
+                _ = try? launchctl(["bootstrap", domain, agentURL.path])
+            } else { try? FileManager.default.removeItem(at: agentURL) }
+            throw QueryError.message("无法启用与 Codex 的启停联动：" + message.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+    static func disable() throws {
+        let (status, message) = try launchctl(["bootout", domain + "/" + label])
+        // launchctl uses 3 for a service that is already unloaded.
+        guard status == 0 || status == 3 else {
+            throw QueryError.message("无法停止自启动助手：" + message.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        if isEnabled { try FileManager.default.removeItem(at: agentURL) }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let model = UsageModel()
     var status: NSStatusItem!
@@ -439,6 +493,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         info.view = view
         menu.addItem(info)
         menu.addItem(.separator())
+        let autostart = NSMenuItem(title: "随 Codex 打开／退出", action: #selector(toggleAutostart), keyEquivalent: "")
+        autostart.target = self
+        autostart.state = CodexAutostart.isEnabled ? .on : .off
+        menu.addItem(autostart)
         for (title, selector, key) in [("显示独立窗口", #selector(showWindow), ""), ("立即刷新", #selector(refresh), "r"), ("退出", #selector(quit), "q")] {
             let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
             item.target = self
@@ -460,12 +518,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+    @objc func toggleAutostart() {
+        do {
+            if CodexAutostart.isEnabled { try CodexAutostart.disable() }
+            else { try CodexAutostart.enable() }
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "自启动设置未完成"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
     @objc func refresh() { model.refresh() }
     @objc func woke() { model.refresh() }
     @objc func quit() { NSApp.terminate(nil) }
 }
 
-if CommandLine.arguments.contains("--check") {
+if CommandLine.arguments.contains("--enable-autostart") || CommandLine.arguments.contains("--disable-autostart") {
+    do {
+        if CommandLine.arguments.contains("--enable-autostart") { try CodexAutostart.enable() }
+        else { try CodexAutostart.disable() }
+        print(CodexAutostart.isEnabled ? "已启用：随 Codex 打开／退出。" : "已关闭与 Codex 的启停联动。")
+    } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+} else if CommandLine.arguments.contains("--check") {
     do {
         let limits = try QuotaClient.read()
         for (id, bucket) in limits.buckets {

@@ -10,13 +10,14 @@
 
 [下载 macOS Apple Silicon 版](downloads/CodexUsageBar-macos-arm64.zip)，解压后运行 `CodexUsageBar.app`。升级时先从旧版菜单中选择「退出」，再打开新版。
 
-当前下载版本为 1.2.2，使用本地临时签名，未经 Apple 公证。Intel Mac 请按下方步骤从源码构建。
+当前下载版本为 1.3.0，使用本地临时签名，未经 Apple 公证。Intel Mac 请按下方步骤从源码构建。
 
 ## 功能
 
 - 显示 5 小时和每周的剩余百分比，支持服务返回的其他用量周期。
 - 菜单栏采用上下两行：`5h 95%` / `周 49%`，常见周期占约 54 pt 宽度。等宽数字和固定宽度避免刷新时跳动；示例数值仅用于说明。
 - 每行百分比下方带细进度线；使用原生模板图像，由 macOS 根据菜单栏背景及选中状态自动调整所有文字和线条的颜色。鼠标悬停显示完整周期和更新时间。
+- 可开启「随 Codex 打开／退出」：Codex 启动时自动打开小工具，最后一个 Codex 应用进程退出时关闭小工具。
 - 每 60 秒自动刷新，电脑唤醒后刷新，也可手动刷新。
 - 点击菜单栏查看分组额度卡片：每个周期的剩余百分比与重置时间放在同一张卡片中，使用随系统明暗模式变化的正常信息文字，避免被渲染成浅灰禁用项。也可打开独立窗口。
 - 支持多个用量桶；菜单栏显示主要桶，菜单和窗口显示全部桶。
@@ -42,7 +43,25 @@ open dist/CodexUsageBar.app
 
 应用默认只出现在菜单栏。点击菜单中的「显示独立窗口」打开可置顶窗口；关闭窗口后仍在菜单栏运行。完全退出请选择菜单中的「退出」。
 
-如需登录后自动启动，可在 macOS「系统设置 → 通用 → 登录项」中添加应用。
+## 随 Codex 启停
+
+将应用放在固定位置（推荐 `~/Applications/CodexUsageBar.app`），在菜单中勾选「随 Codex 打开／退出」。开启后：
+
+- Codex 打开时，小工具自动启动，不抢焦点；已经运行时不会重复启动。
+- 退出 Codex 应用时，小工具随之退出。只关闭一个 Codex 窗口、但应用仍在运行时，小工具继续运行。
+- 手动退出小工具后，不会反复拉起；下次打开 Codex 时再启动。
+- 取消勾选会关闭联动，恢复独立运行。
+
+联动通过当前用户的 macOS LaunchAgent 和随应用附带的 `CodexUsageWatcher` 助手实现。助手只监听应用启动和退出事件，不轮询账户、不查询额度、不需要管理员权限。启用后每次登录会恢复监听；若 Codex 当时已运行，也会启动小工具。配置位于 `~/Library/LaunchAgents/local.codex.usagebar.watch-codex.plist`。移动应用后，请重新关闭再开启联动以更新路径。
+
+也可通过命令行设置：
+
+```sh
+~/Applications/CodexUsageBar.app/Contents/MacOS/CodexUsageBar --enable-autostart
+~/Applications/CodexUsageBar.app/Contents/MacOS/CodexUsageBar --disable-autostart
+```
+
+卸载前先取消勾选联动，再删除应用。
 
 ## 用量与登录
 
@@ -65,7 +84,8 @@ bash scripts/test.sh
 ## 源码结构
 
 ```text
-Sources/main.swift      用量查询、菜单栏与独立窗口
+Sources/main.swift      用量查询、菜单栏、独立窗口与启停设置
+Sources/Watcher.swift   监听 Codex 启动和退出的后台助手
 Resources/Info.plist    macOS 应用元数据
 scripts/build.sh        本机构建、签名与打包
 ```
